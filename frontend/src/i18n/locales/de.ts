@@ -344,6 +344,8 @@ export default {
       model: 'Modell',
       location: 'Standort',
       eta: 'Restzeit',
+      custom: 'Benutzerdefiniert (ziehen)',
+      dragToReorder: 'Zum Neuanordnen ziehen',
       ascending: 'Aufsteigend sortieren',
       descending: 'Absteigend sortieren',
     },

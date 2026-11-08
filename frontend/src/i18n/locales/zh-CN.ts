@@ -344,6 +344,8 @@ export default {
       model: '型号',
       location: '位置',
       eta: '剩余时间',
+      custom: '自定义（拖动）',
+      dragToReorder: '拖动以重新排序',
       ascending: '升序排列',
       descending: '降序排列',
     },

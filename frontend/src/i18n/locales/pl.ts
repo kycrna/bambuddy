@@ -346,6 +346,8 @@ export default {
       model: 'Model',
       location: 'Lokalizacja',
       eta: 'Przewidywany koniec',
+      custom: 'Własna (przeciągnij)',
+      dragToReorder: 'Przeciągnij, aby zmienić kolejność',
       ascending: 'Sortuj rosnąco',
       descending: 'Sortuj malejąco',
     },

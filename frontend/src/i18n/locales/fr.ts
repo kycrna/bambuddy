@@ -344,6 +344,8 @@ export default {
       model: 'Modèle',
       location: 'Emplacement',
       eta: 'Temps restant',
+      custom: 'Personnalisé (glisser)',
+      dragToReorder: 'Glisser pour réorganiser',
       ascending: 'Tri croissant',
       descending: 'Tri décroissant',
     },
