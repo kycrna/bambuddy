@@ -343,6 +343,8 @@ export default {
       model: 'モデル',
       location: 'ロケーション',
       eta: '残り時間',
+      custom: 'カスタム（ドラッグ）',
+      dragToReorder: 'ドラッグして並べ替え',
       ascending: '昇順で並べ替え',
       descending: '降順で並べ替え',
     },

@@ -344,6 +344,8 @@ export default {
       model: 'Model',
       location: 'Konum',
       eta: 'Kalan süre',
+      custom: 'Özel (sürükle)',
+      dragToReorder: 'Yeniden sıralamak için sürükleyin',
       ascending: 'Artan sırala',
       descending: 'Azalan sırala',
     },

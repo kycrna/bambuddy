@@ -344,6 +344,8 @@ export default {
       model: 'Modell',
       location: 'Plats',
       eta: 'Beräknad tid',
+      custom: 'Anpassad (dra)',
+      dragToReorder: 'Dra för att ändra ordning',
       ascending: 'Sortera stigande',
       descending: 'Sortera fallande',
     },

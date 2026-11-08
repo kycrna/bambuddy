@@ -344,6 +344,8 @@ export default {
       model: 'Modelo',
       location: 'Ubicación',
       eta: 'Tiempo restante',
+      custom: 'Personalizado (arrastrar)',
+      dragToReorder: 'Arrastra para reordenar',
       ascending: 'Orden ascendente',
       descending: 'Orden descendente',
     },

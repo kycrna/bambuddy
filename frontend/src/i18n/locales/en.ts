@@ -346,6 +346,8 @@ export default {
       model: 'Model',
       location: 'Location',
       eta: 'ETA',
+      custom: 'Custom (drag)',
+      dragToReorder: 'Drag to reorder',
       ascending: 'Sort ascending',
       descending: 'Sort descending',
     },

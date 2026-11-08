@@ -1,5 +1,8 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, rectSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { compareFwVersions } from '../utils/firmwareVersion';
 import { mapModelCode } from '../utils/printerModel';
 import { formatPrintName } from '../utils/printName';
@@ -159,6 +162,7 @@ import {
   ThumbsUp,
   ThumbsDown,
   KeyRound,
+  GripHorizontal,
 } from 'lucide-react';
 import { ConfirmOutcomeDialog } from '../components/ConfirmOutcomeDialog';
 
@@ -1349,7 +1353,39 @@ function StatusSummaryBar({ printers }: { printers: Printer[] | undefined }) {
   );
 }
 
-type SortOption = 'name' | 'status' | 'model' | 'location' | 'eta';
+type SortOption = 'name' | 'status' | 'model' | 'location' | 'eta' | 'custom';
+
+// Grid item for the "Custom" sort: lets the user drag a card to a new
+// position. Dragging only starts from the handle, so the card's own buttons,
+// sliders and text stay usable. When PrinterCard renders nothing (hidden
+// offline printer), the handle is the only child and the wrapper hides itself
+// so it doesn't leave an empty grid cell.
+function SortablePrinterItem({ id, enabled, label, children }: { id: number; enabled: boolean; label: string; children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id, disabled: !enabled });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`relative [&:has(>[data-drag-handle]:first-child)]:hidden ${isDragging ? 'z-20 opacity-80' : ''}`}
+    >
+      {children}
+      {enabled && (
+        <button
+          type="button"
+          ref={setActivatorNodeRef}
+          data-drag-handle
+          {...attributes}
+          {...listeners}
+          title={label}
+          aria-label={label}
+          className="absolute top-1 left-1/2 -translate-x-1/2 z-10 px-3 py-0.5 rounded-md text-bambu-gray hover:text-white hover:bg-bambu-dark-tertiary cursor-grab active:cursor-grabbing touch-none"
+        >
+          <GripHorizontal className="w-5 h-5" />
+        </button>
+      )}
+    </div>
+  );
+}
 type ViewMode = 'expanded' | 'compact';
 
 type ToolbarDropdownOption<T extends string> = {
@@ -8919,6 +8955,14 @@ export function PrintersPage() {
   const [sortBy, setSortBy] = useState<SortOption>(() => {
     return (localStorage.getItem('printerSortBy') as SortOption) || 'name';
   });
+  const [customOrder, setCustomOrder] = useState<number[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('printerCustomOrder') || '[]');
+      return Array.isArray(saved) ? saved.filter((n): n is number => typeof n === 'number') : [];
+    } catch {
+      return [];
+    }
+  });
   const [sortAsc, setSortAsc] = useState<boolean>(() => {
     return localStorage.getItem('printerSortAsc') !== 'false';
   });
@@ -9508,6 +9552,17 @@ export function PrintersPage() {
           return getPriority(statusA) - getPriority(statusB);
         });
         break;
+      case 'custom': {
+        // Saved drag order; printers not yet placed go last, by name
+        const pos = new Map(customOrder.map((id, i) => [id, i]));
+        sorted.sort((a, b) => {
+          const pa = pos.get(a.id) ?? Infinity;
+          const pb = pos.get(b.id) ?? Infinity;
+          if (pa !== pb) return pa - pb;
+          return a.name.localeCompare(b.name);
+        });
+        break;
+      }
       case 'eta':
         sorted.sort((a, b) => {
           const statusA = queryClient.getQueryData<{ connected: boolean; state: string | null; remaining_time: number | null }>(['printerStatus', a.id]);
@@ -9533,12 +9588,37 @@ export function PrintersPage() {
     }
 
     // Apply ascending/descending
-    if (!sortAsc) {
+    if (!sortAsc && sortBy !== 'custom') {
       sorted.reverse();
     }
 
     return sorted;
-  }, [filteredPrinters, sortBy, sortAsc, queryClient]);
+  }, [filteredPrinters, sortBy, sortAsc, queryClient, customOrder]);
+
+  const dragSensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const handlePrinterDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !printers) return;
+    // Reorder against the full printer list (not just the filtered view) so
+    // printers hidden by a search or filter keep their saved place.
+    const placed = new Set(customOrder);
+    const unplaced = printers
+      .filter(p => !placed.has(p.id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(p => p.id);
+    const known = new Set(printers.map(p => p.id));
+    const full = [...customOrder.filter(id => known.has(id)), ...unplaced];
+    const from = full.indexOf(Number(active.id));
+    const to = full.indexOf(Number(over.id));
+    if (from < 0 || to < 0) return;
+    const next = arrayMove(full, from, to);
+    setCustomOrder(next);
+    try { localStorage.setItem('printerCustomOrder', JSON.stringify(next)); } catch { /* quota exceeded / private mode */ }
+  }, [customOrder, printers]);
 
   const selectAll = useCallback(() => {
     setSelectedPrinterIds(new Set(sortedPrinters.map(p => p.id)));
@@ -9585,7 +9665,7 @@ export function PrintersPage() {
 
   // Group printers when sorted by location, status, or model
   const groupedPrinters = useMemo(() => {
-    if (sortBy === 'name' || sortBy === 'eta') return null;
+    if (sortBy === 'name' || sortBy === 'eta' || sortBy === 'custom') return null;
 
     const groups: Record<string, typeof sortedPrinters> = {};
 
@@ -9716,9 +9796,10 @@ export function PrintersPage() {
             { value: 'model', label: t('printers.sort.model') },
             { value: 'location', label: t('printers.sort.location') },
             { value: 'eta', label: t('printers.sort.eta') },
+            { value: 'custom', label: t('printers.sort.custom', 'Custom (drag)') },
           ]}
         />
-        <button
+        {sortBy !== 'custom' && <button
           onClick={toggleSortDirection}
           className="h-8 shrink-0 px-2 rounded-lg border bg-bambu-dark border-bambu-dark-tertiary text-white hover:bg-bambu-dark-tertiary transition-colors flex items-center justify-center"
           title={sortAsc ? t('printers.sort.descending') : t('printers.sort.ascending')}
@@ -9728,7 +9809,7 @@ export function PrintersPage() {
           ) : (
             <ArrowDown className="w-4 h-4 text-white" />
           )}
-        </button>
+        </button>}
         <RouterLink
           to="/printer-locations"
           className="h-8 shrink-0 px-2 rounded-lg border bg-bambu-dark border-bambu-dark-tertiary text-white hover:bg-bambu-dark-tertiary transition-colors flex items-center justify-center"
@@ -10130,10 +10211,12 @@ export function PrintersPage() {
         </div>
       ) : (
         /* Regular grid view */
+        <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={handlePrinterDragEnd}>
+        <SortableContext items={sortedPrinters.map(p => p.id)} strategy={rectSortingStrategy}>
         <div className={`grid gap-4 ${cardSize >= 3 ? 'gap-6' : ''} ${getGridClasses()}`}>
           {sortedPrinters.map((printer) => (
+            <SortablePrinterItem key={printer.id} id={printer.id} enabled={sortBy === 'custom'} label={t('printers.sort.dragToReorder', 'Drag to reorder')}>
             <PrinterCard
-              key={printer.id}
               printer={printer}
               hideIfDisconnected={hideDisconnected}
               maintenanceInfo={maintenanceByPrinter[printer.id]}
@@ -10175,8 +10258,11 @@ export function PrintersPage() {
               aiLastError={aiPrinterStatus?.last_error ?? null}
               aiLastErrorCode={octoEverywherePrinterStatus?.enabled ? octoEverywherePrinterStatus.last_error_code : null}
             />
+            </SortablePrinterItem>
           ))}
         </div>
+        </SortableContext>
+        </DndContext>
       )}
 
       {cardSize === 2 && compactDrilldownPrinterId != null && (

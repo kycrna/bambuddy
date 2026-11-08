@@ -331,6 +331,8 @@ export default {
       model: '모델',
       location: '위치',
       eta: '남은 시간',
+      custom: '사용자 지정 (드래그)',
+      dragToReorder: '드래그하여 순서 변경',
       ascending: '오름차순 정렬',
       descending: '내림차순 정렬'
     },

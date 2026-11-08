@@ -344,6 +344,8 @@ export default {
       model: 'Model',
       location: 'Locatie',
       eta: 'ETA',
+      custom: 'Aangepast (slepen)',
+      dragToReorder: 'Sleep om te herschikken',
       ascending: 'Oplopend sorteren',
       descending: 'Aflopend sorteren',
     },
