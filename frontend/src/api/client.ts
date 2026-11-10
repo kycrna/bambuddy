@@ -1587,6 +1587,11 @@ export interface AppSettings {
   // Staggered batch start defaults
   stagger_group_size: number;
   stagger_interval_minutes: number;
+  // Bed-heat stagger (kycrna fork): hold queued starts while another
+  // participating printer's bed is heating
+  bed_heat_stagger_enabled: boolean;
+  bed_heat_stagger_printer_ids: string;
+  bed_heat_stagger_max_wait_minutes: number;
   // Finance budget reset window
   billing_enabled: boolean;
   printer_kill_switch_enabled: boolean;

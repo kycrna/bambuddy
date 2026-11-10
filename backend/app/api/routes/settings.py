@@ -219,6 +219,7 @@ _BOOL_SETTING_KEYS = frozenset(
         "local_login_enabled",
         "preheat_enabled",
         "queue_keep_bed_warm",
+        "bed_heat_stagger_enabled",
         "obico_enabled",
         "octoeverywhere_enabled",
     }
@@ -254,6 +255,7 @@ _INT_SETTING_KEYS = frozenset(
         "mqtt_port",
         "stagger_group_size",
         "stagger_interval_minutes",
+        "bed_heat_stagger_max_wait_minutes",
         "forecast_global_lead_time_days",
         "location_sensor_poll_interval",
         "finance_budget_reset_day",

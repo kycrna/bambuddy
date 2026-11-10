@@ -33,7 +33,13 @@ from backend.app.models.settings import Settings
 from backend.app.models.smart_plug import SmartPlug
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
-from backend.app.services import drying_preflight, kprofile_drift, print_dispatch_context, stock_forecast
+from backend.app.services import (
+    bed_heat_stagger,
+    drying_preflight,
+    kprofile_drift,
+    print_dispatch_context,
+    stock_forecast,
+)
 from backend.app.services.bambu_ftp import (
     FtpFailureKind,
     FtpFailureReport,
@@ -1423,6 +1429,9 @@ class PrintScheduler:
         # when a gate setting toggles off mid-hold — the release publishes
         # bed → 0 first).
         self._keep_warm: dict[int, _KeepWarmEntry] = {}
+        # Bed-heat stagger (kycrna fork): how long each participating printer
+        # has been blocking others, so a stuck heater cannot hold the farm.
+        self._bed_heat_tracker = bed_heat_stagger.BedHeatTracker()
         # Preheat rollback registry: printer_id -> subset of
         # {"bed", "chamber", "airduct"} listing which preheat commands
         # actually fired for the in-flight dispatch. `_dispatch_one` unwinds
@@ -1639,6 +1648,7 @@ class PrintScheduler:
             self._terminal_since,
         ):
             keyed.pop(printer_id, None)
+        self._bed_heat_tracker.forget(printer_id)
         for keyed in (self._auto_dry_units, self._auto_dry_above):
             for key in [key for key in keyed if key[0] == printer_id]:
                 del keyed[key]
@@ -2066,6 +2076,43 @@ class PrintScheduler:
                     creator_scopes[user_id] = await resolve_user_id_printer_scope(db, user_id)
                 return creator_scopes[user_id]
 
+            # Bed-heat stagger (kycrna fork). Participating printers whose bed is
+            # warming up, read once per pass. A printer this pass dispatches to
+            # joins the set as it is claimed, so two jobs ready together go out
+            # one at a time. Never allowed to stop the queue.
+            bed_stagger_participants: set[int] = set()
+            bed_stagger_blockers: set[int] = set()
+            bed_stagger_labels: dict[int, str] = {}
+            # Printers held by the rule this pass; kept out of keep-warm.
+            bed_stagger_held: set[int] = set()
+            try:
+                if await self._get_bool_setting(db, "bed_heat_stagger_enabled", default=True):
+                    bed_stagger_participants = bed_heat_stagger.parse_printer_ids(
+                        await self._get_setting(db, "bed_heat_stagger_printer_ids")
+                    )
+                if bed_stagger_participants:
+                    bed_stagger_blockers, bed_stagger_labels = await self._bed_heat_blockers(
+                        db, bed_stagger_participants
+                    )
+            except Exception as e:
+                logger.warning("Bed-heat stagger check failed, not holding anything: %s", e, exc_info=True)
+                bed_stagger_participants, bed_stagger_blockers = set(), set()
+
+            def bed_stagger_reason(printer_id: int, label: str) -> str | None:
+                """The hold reason if the bed-heat stagger holds *printer_id*, else None."""
+                if printer_id not in bed_stagger_participants:
+                    return None
+                others = bed_stagger_blockers - {printer_id}
+                if not others:
+                    return None
+                return bed_heat_stagger.hold_reason(
+                    label, [bed_stagger_labels.get(pid, f"printer {pid}") for pid in others]
+                )
+
+            def bed_stagger_claim(printer_id: int) -> None:
+                if printer_id in bed_stagger_participants:
+                    bed_stagger_blockers.add(printer_id)
+
             for item in items:
                 # Check scheduled time first (scheduled_time is stored in UTC from ISO string)
                 if item.scheduled_time:
@@ -2318,6 +2365,18 @@ class PrintScheduler:
                         )
                         continue
 
+                    # Bed-heat stagger (kycrna fork): another participating
+                    # printer is warming its bed. Delay only; the item keeps its
+                    # place and the printer stays reserved for it.
+                    stagger_reason = bed_stagger_reason(item.printer_id, printer_label(item.printer_id))
+                    if stagger_reason:
+                        skip_reasons["bed_heat_stagger"] = skip_reasons.get("bed_heat_stagger", 0) + 1
+                        bed_stagger_held.add(item.printer_id)
+                        await hold_for_printer(
+                            item, item.printer_id, "bed-heat stagger: another bed is heating", stagger_reason
+                        )
+                        continue
+
                     # Print takes priority: stop a cycle Bambuddy armed, now
                     # that this item is definitely going out.
                     #
@@ -2351,6 +2410,7 @@ class PrintScheduler:
                     _claim_library_row(item)
                     dispatch_ids.append(item.id)
                     claim_printer(item.printer_id)
+                    bed_stagger_claim(item.printer_id)
 
                     # SJF starvation guard: mark items that were jumped
                     if sjf_enabled and item.print_time_seconds is not None:
@@ -2510,6 +2570,18 @@ class PrintScheduler:
                         per_model_reasons = [(item.target_model, MODEL_GATE_WAIT_REASON)]
                     waiting_reason = None if printer_id else _collapse_waiting_reasons(per_model_reasons)
 
+                    # Bed-heat stagger (kycrna fork). Held before assignment, so
+                    # the job stays "any <model>" and takes whichever printer is
+                    # free once the warming bed is up to temperature.
+                    stagger_reason = (
+                        bed_stagger_reason(printer_id, bed_stagger_labels.get(printer_id, f"printer {printer_id}"))
+                        if printer_id
+                        else None
+                    )
+                    if stagger_reason:
+                        skip_reasons["bed_heat_stagger"] = skip_reasons.get("bed_heat_stagger", 0) + 1
+                        waiting_reason = stagger_reason
+
                     # Fold the winning variant's file and settings onto the item
                     # before anything else looks at them — the guards below and
                     # every step of the dispatch read the item's own columns.
@@ -2540,7 +2612,7 @@ class PrintScheduler:
                                 db=db,
                             )
 
-                    if printer_id:
+                    if printer_id and not stagger_reason:
                         # Before claiming the printer: hold back rather than race
                         # another dispatch over the same transient library row.
                         # Checked here so a held item does not get a printer
@@ -2634,6 +2706,7 @@ class PrintScheduler:
                         _claim_library_row(item)
                         dispatch_ids.append(item.id)
                         claim_printer(printer_id)
+                        bed_stagger_claim(printer_id)
 
                         # SJF starvation guard: mark items that were jumped
                         if sjf_enabled and item.print_time_seconds is not None:
@@ -2686,8 +2759,10 @@ class PrintScheduler:
             # auxiliary check wedge the queue. The bed simply stays wherever it
             # was, and the next tick tries again.
             try:
+                # Printers held by the bed-heat stagger are left out: warming a
+                # held bed is exactly the draw the hold exists to avoid.
                 await self._apply_keep_warm(
-                    db, items, dispatch_ids, busy_printers - backoff_printers, require_plate_clear
+                    db, items, dispatch_ids, busy_printers - backoff_printers - bed_stagger_held, require_plate_clear
                 )
             except Exception as e:
                 logger.warning("Keep-warm pass failed, continuing with dispatch: %s", e, exc_info=True)
@@ -5225,6 +5300,41 @@ class PrintScheduler:
     def _release_dispatch_hold(self, printer_id: int) -> None:
         """Drop the dispatch hold for ``printer_id`` (called by the watchdog)."""
         self._dispatch_holds.pop(printer_id, None)
+
+    async def _bed_heat_blockers(self, db: AsyncSession, participants: set[int]) -> tuple[set[int], dict[int, str]]:
+        """Participating printers warming their bed now, and names to show for them.
+
+        "Starting" covers what live state cannot show yet: an upload (or
+        Bambuddy's own preheat) still in flight, and a print command the
+        printer has not acted on (the post-dispatch hold). Each blocker is
+        capped at ``bed_heat_stagger_max_wait_minutes`` so a stuck heater or a
+        job sat in PREPARE cannot hold the rest of the farm forever.
+        """
+        starting = {pid for (_task, pid) in self._inflight.values() if pid is not None}
+        starting |= {pid for pid in list(self._dispatch_holds) if self._printer_in_dispatch_hold(pid)}
+        raw = bed_heat_stagger.raw_blockers(
+            participants,
+            statuses={pid: printer_manager.get_status(pid) for pid in participants},
+            connected={pid for pid in participants if printer_manager.is_connected(pid)},
+            starting=starting & participants,
+        )
+        max_wait_minutes = await self._get_int_setting(
+            db, "bed_heat_stagger_max_wait_minutes", default=bed_heat_stagger.DEFAULT_MAX_WAIT_MINUTES
+        )
+        blockers, timed_out = self._bed_heat_tracker.update(raw, time.monotonic(), max(1, max_wait_minutes) * 60)
+        for pid in timed_out:
+            logger.warning(
+                "Bed-heat stagger: printer %d has been warming up for over %d min; no longer holding other printers for it",
+                pid,
+                max_wait_minutes,
+            )
+        labels: dict[int, str] = {}
+        rows = await db.execute(select(Printer.id, Printer.name).where(Printer.id.in_(participants)))
+        for pid, name in rows.all():
+            labels[pid] = name or f"printer {pid}"
+        if blockers:
+            logger.info("Bed-heat stagger: warming up now: %s", sorted(labels.get(p, str(p)) for p in blockers))
+        return blockers, labels
 
     def _printer_in_dispatch_hold(self, printer_id: int) -> bool:
         """True if ``printer_id`` is still inside its post-dispatch hold window.
