@@ -462,6 +462,23 @@ class AppSettings(BaseModel):
         default=5, ge=1, le=60, description="Minutes between staggered printer groups"
     )
 
+    # Bed-heat stagger (kycrna fork): hold a queued start on a participating
+    # printer while another participating printer is warming its bed.
+    bed_heat_stagger_enabled: bool = Field(
+        default=True,
+        description="Hold queued starts on participating printers while another participating bed is heating",
+    )
+    bed_heat_stagger_printer_ids: str = Field(
+        default="",
+        description="Comma-separated printer ids that take part in the bed-heat stagger (empty = none)",
+    )
+    bed_heat_stagger_max_wait_minutes: int = Field(
+        default=20,
+        ge=1,
+        le=120,
+        description="Stop holding other printers for one that has been warming up longer than this",
+    )
+
     # Finance budget window settings
     billing_enabled: bool = Field(
         default=False,
@@ -848,6 +865,9 @@ class AppSettingsUpdate(BaseModel):
     confirm_default_good_on_plate_clear: bool | None = None
     stagger_group_size: int | None = Field(default=None, ge=1, le=50)
     stagger_interval_minutes: int | None = Field(default=None, ge=1, le=60)
+    bed_heat_stagger_enabled: bool | None = None
+    bed_heat_stagger_printer_ids: str | None = None
+    bed_heat_stagger_max_wait_minutes: int | None = Field(default=None, ge=1, le=120)
     billing_enabled: bool | None = None
     printer_kill_switch_enabled: bool | None = None
     finance_budget_reset_day: int | None = Field(default=None, ge=1, le=31)

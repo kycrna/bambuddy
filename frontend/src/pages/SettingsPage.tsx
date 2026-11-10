@@ -95,7 +95,7 @@ registerSettingsSearch({ labelKey: 'settings.providers', tab: 'notifications', k
 registerSettingsSearch({ labelKey: 'settings.messageTemplates', tab: 'notifications', keywords: 'message templates notification text edit', anchor: 'card-templates' });
 registerSettingsSearch({ labelKey: 'settings.defaultPrintOptions', labelFallback: 'Default Print Options', tab: 'queue', keywords: 'print bed leveling flow calibration vibration first layer timelapse', anchor: 'card-print-options' });
 registerSettingsSearch({ labelKey: 'settings.tempFanPresetsTitle', labelFallback: 'Temperature & Fan Presets', tab: 'queue', keywords: 'temperature fan presets nozzle bed chamber quick buttons popover', anchor: 'card-temp-fan-presets' });
-registerSettingsSearch({ labelKey: 'settings.staggeredStart', labelFallback: 'Staggered Start', tab: 'queue', keywords: 'staggered batch delay start queue group', anchor: 'card-staggered' });
+registerSettingsSearch({ labelKey: 'settings.staggeredStart', labelFallback: 'Staggered Start', tab: 'queue', keywords: 'staggered batch delay start queue group bed heat power warm', anchor: 'card-staggered' });
 registerSettingsSearch({ labelKey: 'settings.plateClear', labelFallback: 'Plate-Clear Confirmation', tab: 'queue', keywords: 'plate clear confirm auto queue', anchor: 'card-plate' });
 registerSettingsSearch({ labelKey: 'settings.concurrentUploadsTitle', labelFallback: 'Concurrent Uploads', tab: 'queue', keywords: 'concurrent parallel upload transfer ftp queue slow farm simultaneous', anchor: 'card-concurrent-uploads' });
 registerSettingsSearch({ labelKey: 'settings.gcodeInjection', labelFallback: 'G-code Injection', tab: 'queue', keywords: 'gcode injection start end autoprint farmloop swapmod autoclear printflow', anchor: 'card-gcode' });
@@ -1352,6 +1352,9 @@ export function SettingsPage() {
       (baseline.confirm_default_good_on_plate_clear ?? false) !== (localSettings.confirm_default_good_on_plate_clear ?? false) ||
       (baseline.stagger_group_size ?? 2) !== (localSettings.stagger_group_size ?? 2) ||
       (baseline.stagger_interval_minutes ?? 5) !== (localSettings.stagger_interval_minutes ?? 5) ||
+      (baseline.bed_heat_stagger_enabled ?? true) !== (localSettings.bed_heat_stagger_enabled ?? true) ||
+      (baseline.bed_heat_stagger_printer_ids ?? '') !== (localSettings.bed_heat_stagger_printer_ids ?? '') ||
+      (baseline.bed_heat_stagger_max_wait_minutes ?? 20) !== (localSettings.bed_heat_stagger_max_wait_minutes ?? 20) ||
       (baseline.require_plate_clear ?? false) !== (localSettings.require_plate_clear ?? false) ||
       (baseline.queue_max_concurrent_uploads ?? 4) !== (localSettings.queue_max_concurrent_uploads ?? 4) ||
       (baseline.preheat_enabled ?? false) !== (localSettings.preheat_enabled ?? false) ||
@@ -1481,6 +1484,9 @@ export function SettingsPage() {
         confirm_default_good_on_plate_clear: localSettings.confirm_default_good_on_plate_clear,
         stagger_group_size: localSettings.stagger_group_size,
         stagger_interval_minutes: localSettings.stagger_interval_minutes,
+        bed_heat_stagger_enabled: localSettings.bed_heat_stagger_enabled,
+        bed_heat_stagger_printer_ids: localSettings.bed_heat_stagger_printer_ids,
+        bed_heat_stagger_max_wait_minutes: localSettings.bed_heat_stagger_max_wait_minutes,
         require_plate_clear: localSettings.require_plate_clear,
         queue_max_concurrent_uploads: localSettings.queue_max_concurrent_uploads,
         preheat_enabled: localSettings.preheat_enabled,
@@ -5463,6 +5469,89 @@ export function SettingsPage() {
                     {t('settings.staggerIntervalHelp', 'Delay between each group starting')}
                   </p>
                 </div>
+              </div>
+
+              {/* Bed-heat stagger (kycrna fork) */}
+              <div className="pt-3 border-t border-bambu-dark-tertiary space-y-3" id="bed-heat-stagger">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 mr-4">
+                    <p className="text-sm text-white">
+                      {t('settings.bedHeatStagger', 'Wait for other beds to heat')}
+                    </p>
+                    <p className="text-xs text-bambu-gray mt-0.5">
+                      {t(
+                        'settings.bedHeatStaggerDesc',
+                        'Applies to every queued job, not just multi-printer sends. A queued job on a ticked printer waits while another ticked printer is warming up its bed, then starts once that bed reaches temperature. Keeps big bed heaters from drawing peak power together. Jobs are only delayed, never cancelled. Unticked printers are ignored.',
+                      )}
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      aria-label={t('settings.bedHeatStagger', 'Wait for other beds to heat')}
+                      checked={localSettings.bed_heat_stagger_enabled ?? true}
+                      onChange={(e) => updateSetting('bed_heat_stagger_enabled', e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                  </label>
+                </div>
+                {(localSettings.bed_heat_stagger_enabled ?? true) && (
+                  <>
+                    <div>
+                      <p className="text-xs text-bambu-gray mb-1">
+                        {t('settings.bedHeatStaggerPrinters', 'Printers that take part')}
+                      </p>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1">
+                        {(printers ?? []).map((p) => {
+                          const ids = new Set(
+                            (localSettings.bed_heat_stagger_printer_ids ?? '')
+                              .split(',')
+                              .map((x) => parseInt(x.trim(), 10))
+                              .filter((x) => !Number.isNaN(x)),
+                          );
+                          return (
+                            <label key={p.id} className="flex items-center gap-2 text-sm text-white">
+                              <input
+                                type="checkbox"
+                                checked={ids.has(p.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) ids.add(p.id);
+                                  else ids.delete(p.id);
+                                  updateSetting(
+                                    'bed_heat_stagger_printer_ids',
+                                    [...ids].sort((a, b) => a - b).join(','),
+                                  );
+                                }}
+                                className="rounded border-bambu-dark-tertiary bg-bambu-dark text-bambu-green focus:ring-bambu-green"
+                              />
+                              {p.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-bambu-gray mt-1">
+                        {t('settings.bedHeatStaggerPrintersHelp', 'None ticked = the rule does nothing.')}
+                      </p>
+                    </div>
+                    <div className="sm:w-1/2">
+                      <label className="block text-xs text-bambu-gray mb-1">
+                        {t('settings.bedHeatStaggerMaxWait', 'Give up on a stuck printer after (minutes)')}
+                      </label>
+                      <NumberInput
+                        min={1}
+                        max={120}
+                        value={localSettings.bed_heat_stagger_max_wait_minutes ?? 20}
+                        onChange={(v) => updateSetting('bed_heat_stagger_max_wait_minutes', v)}
+                        fallback={20}
+                        className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm focus:outline-none focus:border-bambu-green"
+                      />
+                      <p className="text-xs text-bambu-gray mt-1">
+                        {t('settings.bedHeatStaggerMaxWaitHelp', 'A printer still warming up after this long stops holding the others.')}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
             </CardContent>
           </Card>
