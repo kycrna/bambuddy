@@ -317,6 +317,13 @@ def reset_auth_enabled_cache():
 
 
 @pytest.fixture(autouse=True)
+def skip_file_service_probe():
+    """Fork: dispatch tests never probe a real printer's file service."""
+    with patch("backend.app.services.print_scheduler.ensure_file_service", AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def disconnect_printers_registered_during_a_test():
     """Give every test an empty ``printer_manager`` singleton.
 
