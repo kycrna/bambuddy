@@ -53,6 +53,7 @@ from backend.app.services.bambu_ftp import (
 )
 from backend.app.services.bambu_mqtt import _RACK_NOZZLE_IDS, HMS_MQTT_VERIFY_FAILED, resolve_rack_plan_mapping
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
+from backend.app.services.file_service_watchdog import ensure_file_service
 from backend.app.services.finance_budget import (
     create_budget_reservation,
     release_budget_reservation,
@@ -9625,6 +9626,10 @@ class PrintScheduler:
         # The owner is read here, after preheat, so the commit releases this read too.
         toast_uid = await self._queue_owner_id(db, item)
         await db.commit()
+
+        # Fork: a printer whose file service hung while idle is power-cycled
+        # through its smart plug before the upload (P2S-R, Nov 2026).
+        await ensure_file_service(printer)
 
         # Delete existing file if present (avoids 553 error on overwrite)
         try:
