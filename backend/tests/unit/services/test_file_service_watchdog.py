@@ -27,6 +27,8 @@ def _session_with(plugs):
 
 @pytest.fixture
 def fast(monkeypatch):
+    monkeypatch.setattr(wd, "AUTO_POWER_CYCLE", True)
+    monkeypatch.setattr(wd, "alert_file_service_hung", AsyncMock())
     monkeypatch.setattr(wd, "OFF_SECONDS", 0)
     monkeypatch.setattr(wd, "BOOT_CHECK_INTERVAL", 0)
     monkeypatch.setattr(wd.asyncio, "sleep", AsyncMock())
@@ -83,3 +85,31 @@ async def test_no_plug_only_logs(fast):
         pm.get_status.return_value = SimpleNamespace(state="IDLE")
         assert await wd.ensure_file_service(PRINTER) is False
     spm.get_service_for_plug.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_alert_only_by_default(monkeypatch):
+    alert = AsyncMock()
+    monkeypatch.setattr(wd, "alert_file_service_hung", alert)
+    with (
+        patch.object(wd, "probe_file_service", AsyncMock(return_value=False)),
+        patch.object(wd, "smart_plug_manager") as spm,
+    ):
+        assert await wd.ensure_file_service(PRINTER) is False
+    alert.assert_awaited_once_with(PRINTER)
+    spm.get_service_for_plug.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_alert_goes_to_telegram_once_per_cooldown(monkeypatch):
+    monkeypatch.setattr(wd, "_last_alert", {})
+    telegram = SimpleNamespace(name="TG", provider_type="telegram")
+    send = AsyncMock()
+    with (
+        patch.object(wd, "async_session", _session_with([telegram])),
+        patch("backend.app.services.notification_service.notification_service._send_to_providers", send),
+    ):
+        await wd.alert_file_service_hung(PRINTER)
+        await wd.alert_file_service_hung(PRINTER)
+    send.assert_awaited_once()
+    assert send.await_args.args[0] == [telegram]

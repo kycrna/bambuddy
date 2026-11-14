@@ -5,13 +5,15 @@ port 990 after sitting idle for hours while MQTT keeps working, so the card
 looks fine but every upload times out. A power cycle clears it.
 
 Before a queued upload, ``ensure_file_service`` probes the file service. If the
-probe hangs and the printer is idle with a linked smart plug, it power-cycles
-the plug and waits for the file service to come back. Otherwise it only logs,
-and the upload runs (and fails) as it would have.
+probe hangs it sends an alert to every enabled Telegram notification provider.
+With ``AUTO_POWER_CYCLE`` on (off for now, Glenn's call 2026-11-14) it also
+power-cycles an idle printer through its linked smart plug and waits for the
+file service to come back. Either way the upload then runs as it would have.
 """
 
 import asyncio
 import logging
+import time
 
 from sqlalchemy import select
 
@@ -23,6 +25,12 @@ from backend.app.services.printer_manager import printer_manager
 from backend.app.services.smart_plug_manager import publish_plug_state, smart_plug_manager
 
 logger = logging.getLogger(__name__)
+
+# Off: alert only. Set True to power-cycle an idle printer through its plug.
+AUTO_POWER_CYCLE = False
+# At most one alert per printer in this window.
+ALERT_COOLDOWN_SECONDS = 1800.0
+_last_alert: dict[int, float] = {}
 
 PROBE_SOCKET_TIMEOUT = 15.0
 PROBE_CAP = 25.0
@@ -57,6 +65,47 @@ async def probe_file_service(printer: Printer) -> bool:
         return False
 
 
+async def alert_file_service_hung(printer: Printer) -> None:
+    """Tell every enabled Telegram provider the printer's file service hung. Never raises."""
+    now = time.monotonic()
+    last = _last_alert.get(printer.id)
+    if last is not None and now - last < ALERT_COOLDOWN_SECONDS:
+        return
+    _last_alert[printer.id] = now
+    try:
+        # Imported here: notification_service pulls in much of the app.
+        from backend.app.models.notification import NotificationProvider
+        from backend.app.services.notification_service import notification_service
+
+        async with async_session() as db:
+            providers = list(
+                (
+                    await db.execute(
+                        select(NotificationProvider).where(
+                            NotificationProvider.provider_type == "telegram",
+                            NotificationProvider.enabled.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not providers:
+                logger.warning("%s: file service hung but no enabled Telegram provider to alert", printer.name)
+                return
+            title = f"{printer.name}: uploads blocked"
+            message = (
+                f"{printer.name} ({printer.ip_address}) is not answering on its file service (port 990), "
+                "so Bambuddy can't send it print files. Queued jobs for it will stall at 0%. "
+                "Restart the printer, then start the job again."
+            )
+            await notification_service._send_to_providers(
+                providers, title, message, db, "printer_error", printer.id, printer.name
+            )
+    except Exception as e:
+        logger.warning("%s: file service alert failed: %s", printer.name, e)
+
+
 async def ensure_file_service(printer: Printer) -> bool:
     """Make sure the printer's file service answers, power-cycling it if needed.
 
@@ -66,6 +115,11 @@ async def ensure_file_service(printer: Printer) -> bool:
     try:
         if await probe_file_service(printer):
             return True
+
+        await alert_file_service_hung(printer)
+        if not AUTO_POWER_CYCLE:
+            logger.warning("%s: file service not answering (port 990); alert sent, not power-cycling", printer.name)
+            return False
 
         state = printer_manager.get_status(printer.id)
         if state is not None and (state.state or "").upper() in _BUSY_STATES:
