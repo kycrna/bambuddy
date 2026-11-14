@@ -5781,6 +5781,10 @@ async def _run_migrations(conn):
     await _safe_execute(
         conn, "ALTER TABLE notification_providers ADD COLUMN telegram_verdict_mode VARCHAR(16) DEFAULT 'buttons'"
     )
+    # Migration: messages held back by quiet hours, sent when they end.
+    await _safe_execute(
+        conn, "ALTER TABLE notification_digest_queue ADD COLUMN held_for_quiet_hours BOOLEAN DEFAULT FALSE"
+    )
     await _safe_execute(
         conn,
         """
@@ -6318,6 +6322,7 @@ _PG_COLUMNS_SET_FROM_MODEL = (
     ("groups", "restrict_printers"),
     ("library_files", "variant_position"),
     ("library_folders", "shared"),
+    ("notification_digest_queue", "held_for_quiet_hours"),
     ("notification_providers", "attach_photo"),
     ("notification_providers", "on_ai_failure_detection"),
     ("notification_providers", "on_ams_drying_suspended"),

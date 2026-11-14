@@ -28,6 +28,9 @@ class NotificationDigestQueue(Base):
         Integer, ForeignKey("printers.id", ondelete="SET NULL"), nullable=True
     )
     printer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # True: held back by quiet hours and sent as one message when they end,
+    # not part of the daily digest.
+    held_for_quiet_hours: Mapped[bool | None] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime | None] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     # Relationships

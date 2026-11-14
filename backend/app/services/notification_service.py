@@ -1689,7 +1689,21 @@ class NotificationService:
         photo_cache: dict = {}
         for provider in providers:
             try:
-                # Always send notification immediately
+                # Quiet hours: hold the message and send it, with anything else
+                # held overnight, as one message when they end.
+                if self._is_in_quiet_hours(provider):
+                    await self._queue_for_digest(
+                        provider=provider,
+                        event_type=event_type,
+                        title=title,
+                        message=message,
+                        db=db,
+                        printer_id=printer_id,
+                        printer_name=printer_name,
+                        held_for_quiet_hours=True,
+                    )
+
+                # Always send notification immediately (skipped in quiet hours)
                 success, error = await self._send_to_provider(
                     provider,
                     title,
@@ -3089,8 +3103,10 @@ class NotificationService:
         db: AsyncSession,
         printer_id: int | None = None,
         printer_name: str | None = None,
+        held_for_quiet_hours: bool = False,
     ):
-        """Queue a notification for later delivery in the daily digest."""
+        """Queue a notification for the daily digest, or (held_for_quiet_hours)
+        for the message sent when the provider's quiet hours end."""
         try:
             queue_entry = NotificationDigestQueue(
                 provider_id=provider.id,
@@ -3099,15 +3115,25 @@ class NotificationService:
                 message=message,
                 printer_id=printer_id,
                 printer_name=printer_name,
+                held_for_quiet_hours=held_for_quiet_hours,
             )
             db.add(queue_entry)
             await db.commit()
-            logger.info("Queued notification for digest: %s for provider %s", event_type, provider.name)
+            logger.info(
+                "Queued notification for %s: %s for provider %s",
+                "end of quiet hours" if held_for_quiet_hours else "digest",
+                event_type,
+                provider.name,
+            )
         except Exception as e:
             logger.warning("Failed to queue notification for digest: %s", e)
 
-    async def send_digest(self, provider_id: int):
-        """Send all queued notifications as a single digest for a provider."""
+    async def send_digest(self, provider_id: int, quiet_hours: bool = False):
+        """Send all queued notifications as a single digest for a provider.
+
+        ``quiet_hours`` sends the messages held back by quiet hours instead of
+        the daily digest; those keep their text, since they were never sent.
+        """
         from backend.app.core.database import async_session
 
         async with async_session() as db:
@@ -3121,7 +3147,14 @@ class NotificationService:
             # Get all queued notifications for this provider
             result = await db.execute(
                 select(NotificationDigestQueue)
-                .where(NotificationDigestQueue.provider_id == provider_id)
+                .where(
+                    NotificationDigestQueue.provider_id == provider_id,
+                    (
+                        NotificationDigestQueue.held_for_quiet_hours.is_(True)
+                        if quiet_hours
+                        else NotificationDigestQueue.held_for_quiet_hours.isnot(True)
+                    ),
+                )
                 .order_by(NotificationDigestQueue.created_at)
             )
             queue_entries = list(result.scalars().all())
@@ -3142,33 +3175,10 @@ class NotificationService:
                 logger.debug("No queued notifications for provider %s", provider.name)
                 return
 
-            # Build digest message
-            title = f"Daily Digest - {len(queue_entries)} Events"
-
-            # Group by event type
-            events_by_type: dict[str, list] = {}
-            for entry in queue_entries:
-                if entry.event_type not in events_by_type:
-                    events_by_type[entry.event_type] = []
-                events_by_type[entry.event_type].append(entry)
-
-            # Format the digest body
-            body_parts = []
-            for event_type, entries in events_by_type.items():
-                event_label = event_type.replace("_", " ").title()
-                body_parts.append(f"== {event_label} ({len(entries)}) ==")
-                for entry in entries:
-                    # From an earlier day (late yesterday, or kept from a
-                    # failed digest): say which day.
-                    if entry.created_at.date() != datetime.utcnow().date():
-                        time_str = entry.created_at.strftime("%m-%d %H:%M")
-                    else:
-                        time_str = entry.created_at.strftime("%H:%M")
-                    printer_info = f"[{entry.printer_name}] " if entry.printer_name else ""
-                    body_parts.append(f"  {time_str} {printer_info}{entry.title}")
-                body_parts.append("")
-
-            body = "\n".join(body_parts)
+            if quiet_hours:
+                title, body = self._format_quiet_hours_digest(queue_entries)
+            else:
+                title, body = self._format_daily_digest(queue_entries)
 
             # Send the digest. At its own time even inside quiet hours: skipped
             # there, it was logged as sent and its events deleted (FO-C4).
@@ -3178,7 +3188,7 @@ class NotificationService:
             await self._log_notification(
                 db=db,
                 provider_id=provider.id,
-                event_type="daily_digest",
+                event_type="quiet_hours_digest" if quiet_hours else "daily_digest",
                 title=title,
                 message=body,
                 success=success,
@@ -3193,9 +3203,63 @@ class NotificationService:
             await db.commit()
 
             if success:
-                logger.info("Sent daily digest with %s events to %s", len(queue_entries), provider.name)
+                logger.info("Sent %s with %s events to %s", title, len(queue_entries), provider.name)
             else:
-                logger.warning("Failed to send daily digest to %s: %s", provider.name, error)
+                logger.warning("Failed to send %s to %s: %s", title, provider.name, error)
+
+    # Telegram rejects a message over 4096 characters.
+    QUIET_HOURS_DIGEST_MAX_CHARS = 3500
+
+    def _format_quiet_hours_digest(self, queue_entries: list) -> tuple[str, str]:
+        """Each held message with its time, title and text, oldest first."""
+        title = f"Quiet Hours Digest - {len(queue_entries)} Messages"
+        parts: list[str] = []
+        used = 0
+        for i, entry in enumerate(queue_entries):
+            # created_at is UTC; show local time like the quiet-hours setting.
+            local = entry.created_at.replace(tzinfo=timezone.utc).astimezone() if entry.created_at else None
+            time_str = local.strftime("%m-%d %H:%M") if local else "--:--"
+            printer_info = f"[{entry.printer_name}] " if entry.printer_name else ""
+            text = (entry.message or "").strip()
+            if len(text) > 400:
+                text = text[:400] + "..."
+            part = f"{time_str} {printer_info}{entry.title}\n{text}".rstrip() + "\n"
+            if used + len(part) > self.QUIET_HOURS_DIGEST_MAX_CHARS:
+                parts.append(f"...and {len(queue_entries) - i} more (see the notification log)")
+                break
+            parts.append(part)
+            used += len(part)
+        return title, "\n".join(parts)
+
+    def _format_daily_digest(self, queue_entries: list) -> tuple[str, str]:
+        """The daily digest: one line per event, grouped by event type."""
+        title = f"Daily Digest - {len(queue_entries)} Events"
+
+        # Group by event type
+        events_by_type: dict[str, list] = {}
+        for entry in queue_entries:
+            if entry.event_type not in events_by_type:
+                events_by_type[entry.event_type] = []
+            events_by_type[entry.event_type].append(entry)
+
+        # Format the digest body
+        body_parts = []
+        for event_type, entries in events_by_type.items():
+            event_label = event_type.replace("_", " ").title()
+            body_parts.append(f"== {event_label} ({len(entries)}) ==")
+            for entry in entries:
+                # From an earlier day (late yesterday, or kept from a
+                # failed digest): say which day.
+                if entry.created_at.date() != datetime.utcnow().date():
+                    time_str = entry.created_at.strftime("%m-%d %H:%M")
+                else:
+                    time_str = entry.created_at.strftime("%H:%M")
+                printer_info = f"[{entry.printer_name}] " if entry.printer_name else ""
+                body_parts.append(f"  {time_str} {printer_info}{entry.title}")
+            body_parts.append("")
+
+        body = "\n".join(body_parts)
+        return title, body
 
     async def check_and_send_digests(self):
         """Check all providers and send digests if it's their scheduled time."""
@@ -3224,6 +3288,26 @@ class NotificationService:
                     await self.send_digest(provider.id)
                 except Exception as e:
                     logger.error("Error sending digest for provider %s: %s", provider.id, e)
+
+            # Messages held back by quiet hours: send once the provider's quiet
+            # hours are over (or were turned off). A failed send retries next minute.
+            result = await db.execute(
+                select(NotificationProvider).where(
+                    NotificationProvider.enabled.is_(True),
+                    NotificationProvider.id.in_(
+                        select(NotificationDigestQueue.provider_id).where(
+                            NotificationDigestQueue.held_for_quiet_hours.is_(True)
+                        )
+                    ),
+                )
+            )
+            for provider in result.scalars().all():
+                if self._is_in_quiet_hours(provider):
+                    continue
+                try:
+                    await self.send_digest(provider.id, quiet_hours=True)
+                except Exception as e:
+                    logger.error("Error sending quiet hours digest for provider %s: %s", provider.id, e)
 
     def start_digest_scheduler(self):
         """Start the background scheduler for daily digest notifications."""
