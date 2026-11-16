@@ -106,6 +106,9 @@ class TestCompletionBelongsToQueueItem:
             ("mini-bench_plate_1.3mf", "mini-bench_plate_1.3mf"),
             ("new bench.gcode.3mf", "new_bench.3mf"),
             ("new bench.gcode.3mf", "new_bench.gcode.3mf"),
+            # ".gcode" inside the name (a plate of "santa_P2S.gcode.3mf"): the
+            # print command drops every ".gcode", so the echo has none.
+            ("santa_P2S.gcode_Skin - head.gcode.3mf", "santa_P2S_Skin_-_head"),
         ],
     )
     async def test_accepts_its_own_print_echoed_with_the_extension(self, db_session, archive_filename, subtask):

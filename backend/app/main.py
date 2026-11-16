@@ -9012,9 +9012,17 @@ def _dispatched_name_matches_echo(expected: str, observed: str) -> bool:
     file name with its extension instead (#3485). The echo is tried both as it
     came and with the extensions stripped; the raw form still has to count, so
     a model named ``Foo.3mf`` (file ``Foo.3mf.gcode.3mf``) keeps matching.
+
+    The print command itself drops every ".3mf" and ".gcode" from the file
+    name, not only the trailing ones (``bambu_mqtt`` start_print), so a file
+    named ``santa_P2S.gcode_Skin - head.gcode.3mf`` goes out, and comes back,
+    as ``santa_P2S_Skin_-_head``. That form is tried too.
     """
-    return _subtask_names_match(expected, observed) or _subtask_names_match(
-        expected, _subtask_name_from_filename(observed)
+    as_sent = expected.replace(".3mf", "").replace(".gcode", "")
+    return (
+        _subtask_names_match(expected, observed)
+        or _subtask_names_match(expected, _subtask_name_from_filename(observed))
+        or (as_sent != expected and _subtask_names_match(as_sent, observed))
     )
 
 
