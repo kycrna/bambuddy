@@ -88,7 +88,8 @@ async def test_no_plug_only_logs(fast):
 
 
 @pytest.mark.asyncio
-async def test_alert_only_by_default(monkeypatch):
+async def test_alert_only_when_power_cycle_is_off(monkeypatch):
+    monkeypatch.setattr(wd, "AUTO_POWER_CYCLE", False)
     alert = AsyncMock()
     monkeypatch.setattr(wd, "alert_file_service_hung", alert)
     with (

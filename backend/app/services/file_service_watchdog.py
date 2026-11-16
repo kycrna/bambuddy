@@ -6,7 +6,7 @@ looks fine but every upload times out. A power cycle clears it.
 
 Before a queued upload, ``ensure_file_service`` probes the file service. If the
 probe hangs it sends an alert to every enabled Telegram notification provider.
-With ``AUTO_POWER_CYCLE`` on (off for now, Glenn's call 2026-11-14) it also
+With ``AUTO_POWER_CYCLE`` on (Glenn's call 2026-11-16; alert-only 11-14 to 11-16) it also
 power-cycles an idle printer through its linked smart plug and waits for the
 file service to come back. Either way the upload then runs as it would have.
 """
@@ -26,8 +26,8 @@ from backend.app.services.smart_plug_manager import publish_plug_state, smart_pl
 
 logger = logging.getLogger(__name__)
 
-# Off: alert only. Set True to power-cycle an idle printer through its plug.
-AUTO_POWER_CYCLE = False
+# True: power-cycle an idle printer through its plug. False: alert only.
+AUTO_POWER_CYCLE = True
 # At most one alert per printer in this window.
 ALERT_COOLDOWN_SECONDS = 1800.0
 _last_alert: dict[int, float] = {}
@@ -96,8 +96,13 @@ async def alert_file_service_hung(printer: Printer) -> None:
             title = f"{printer.name}: uploads blocked"
             message = (
                 f"{printer.name} ({printer.ip_address}) is not answering on its file service (port 990), "
-                "so Bambuddy can't send it print files. Queued jobs for it will stall at 0%. "
-                "Restart the printer, then start the job again."
+                "so Bambuddy can't send it print files. "
+                + (
+                    "Bambuddy is power-cycling it through its smart plug (if it is idle and has one) "
+                    "and will send the queued job when it is back."
+                    if AUTO_POWER_CYCLE
+                    else "Queued jobs for it will stall at 0%. Restart the printer, then start the job again."
+                )
             )
             await notification_service._send_to_providers(
                 providers, title, message, db, "printer_error", printer.id, printer.name
